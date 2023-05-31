@@ -180,6 +180,16 @@ const (
 	// regular p2tr output that's sent to an output which is under complete
 	// control of the backing wallet.
 	TaprootPubKeySpend StandardWitnessType = 21
+
+	// TaprootRemoteCommitSpend is a witness type that allows us to spend
+	// our settled local commitment after a CSV delay when the remote party
+	// has force closed the channel.
+	TaprootRemoteCommitSpend StandardWitnessType = 23
+
+	// TaprootCommitmentRevoke is a witness that allows us to sweep the
+	// settled output of a malicious counterparty's who broadcasts a
+	// revoked taproot commitment transaction.
+	TaprootCommitmentRevoke StandardWitnessType = 34
 )
 
 // String returns a human readable version of the target WitnessType.
@@ -252,6 +262,12 @@ func (wt StandardWitnessType) String() string {
 
 	case TaprootPubKeySpend:
 		return "TaprootPubKeySpend"
+
+	case TaprootCommitmentRevoke:
+		return "TaprootCommitmentRevoke"
+
+	case TaprootRemoteCommitSpend:
+		return "TaprootRemoteCommitSpend"
 
 	default:
 		return fmt.Sprintf("Unknown WitnessType: %v", uint32(wt))
@@ -400,7 +416,49 @@ func (wt StandardWitnessType) WitnessGenerator(signer Signer,
 			fallthrough
 		case NestedWitnessKeyHash:
 			return signer.ComputeInputScript(tx, desc)
+		case TaprootCommitmentRevoke:
+			// Ensure that the sign desc has the proper sign method
+			// set, and a valid prev output fetcher.
+			desc.SignMethod = TaprootScriptSpendSignMethod
 
+			// The control block bytes must be set at this point.
+			if desc.ControlBlock == nil {
+				return nil, fmt.Errorf("control block must be " +
+					"set for taproot script spend")
+			}
+
+			witness, err := TaprootCommitSpendRevoke(
+				signer, desc, tx, nil, desc.ControlBlock,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return &Script{
+				Witness: witness,
+			}, nil
+
+		case TaprootRemoteCommitSpend:
+			// Ensure that the sign desc has the proper sign method
+			// set, and a valid prev output fetcher.
+			desc.SignMethod = TaprootScriptSpendSignMethod
+
+			// The control block bytes must be set at this point.
+			if desc.ControlBlock == nil {
+				return nil, fmt.Errorf("control block must be " +
+					"set for taproot spend")
+			}
+
+			witness, err := TaprootCommitRemoteSpend(
+				signer, desc, tx, nil, desc.ControlBlock,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return &Script{
+				Witness: witness,
+			}, nil
 		default:
 			return nil, fmt.Errorf("unknown witness type: %v", wt)
 		}

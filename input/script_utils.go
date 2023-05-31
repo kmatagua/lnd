@@ -1811,13 +1811,9 @@ type CommitScriptTree struct {
 	TapscriptRoot []byte
 }
 
-// NewLocalCommitScriptTree returns a new CommitScript tree that can be used to
-// create and spend the commitment output for the local party.
-func NewLocalCommitScriptTree(csvTimeout uint32,
-	selfKey, revokeKey *btcec.PublicKey) (*CommitScriptTree, error) {
+func NewLocalCommitDelayScript(csvTimeout uint32,
+	selfKey *btcec.PublicKey) ([]byte, error) {
 
-	// First, we'll need to construct the tapLeaf that'll be our delay CSV
-	// clause.
 	builder := txscript.NewScriptBuilder()
 	builder.AddData(schnorr.SerializePubKey(selfKey))
 	builder.AddOp(txscript.OP_CHECKSIG)
@@ -1825,20 +1821,36 @@ func NewLocalCommitScriptTree(csvTimeout uint32,
 	builder.AddOp(txscript.OP_CHECKSEQUENCEVERIFY)
 	builder.AddOp(txscript.OP_DROP)
 
-	delayScript, err := builder.Script()
+	return builder.Script()
+}
+
+func NewLocalCommitRevokeScript(selfKey, revokeKey *btcec.PublicKey) ([]byte,
+	error) {
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddData(schnorr.SerializePubKey(selfKey))
+	builder.AddOp(txscript.OP_DROP)
+	builder.AddData(schnorr.SerializePubKey(revokeKey))
+	builder.AddOp(txscript.OP_CHECKSIG)
+
+	return builder.Script()
+}
+
+// NewLocalCommitScriptTree returns a new CommitScript tree that can be used to
+// create and spend the commitment output for the local party.
+func NewLocalCommitScriptTree(csvTimeout uint32,
+	selfKey, revokeKey *btcec.PublicKey) (*CommitScriptTree, error) {
+
+	// First, we'll need to construct the tapLeaf that'll be our delay CSV
+	// clause.
+	delayScript, err := NewLocalCommitDelayScript(csvTimeout, selfKey)
 	if err != nil {
 		return nil, err
 	}
 
 	// Next, we'll need to construct the revocation path, which is just a
 	// simple checksig script.
-	builder = txscript.NewScriptBuilder()
-	builder.AddData(schnorr.SerializePubKey(selfKey))
-	builder.AddOp(txscript.OP_DROP)
-	builder.AddData(schnorr.SerializePubKey(revokeKey))
-	builder.AddOp(txscript.OP_CHECKSIG)
-
-	revokeScript, err := builder.Script()
+	revokeScript, err := NewLocalCommitRevokeScript(selfKey, revokeKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1955,19 +1967,30 @@ func TaprootCommitSpendSuccess(signer Signer, signDesc *SignDescriptor,
 // TaprootCommitSpendRevoke constructs a valid witness allowing a node to sweep
 // the revoked taproot output of a malicious peer.
 func TaprootCommitSpendRevoke(signer Signer, signDesc *SignDescriptor,
-	revokeTx *wire.MsgTx,
-	scriptTree *txscript.IndexedTapScriptTree) (wire.TxWitness, error) {
+	revokeTx *wire.MsgTx, scriptTree *txscript.IndexedTapScriptTree,
+	ctrlBytes []byte) (wire.TxWitness, error) {
 
 	// First, we'll need to construct a valid control block to execute the
 	// leaf script for revocation path.
-	revokeTapleafHash := txscript.NewBaseTapLeaf(
-		signDesc.WitnessScript,
-	).TapHash()
-	revokeIdx := scriptTree.LeafProofIndex[revokeTapleafHash]
-	revokeMerkleProof := scriptTree.LeafMerkleProofs[revokeIdx]
-	revokeControlBlock := revokeMerkleProof.ToControlBlock(
-		&TaprootNUMSKey,
+	var (
+		ctrlB = ctrlBytes
+		err   error
 	)
+	if len(ctrlBytes) == 0 {
+		revokeTapleafHash := txscript.NewBaseTapLeaf(
+			signDesc.WitnessScript,
+		).TapHash()
+		revokeIdx := scriptTree.LeafProofIndex[revokeTapleafHash]
+		revokeMerkleProof := scriptTree.LeafMerkleProofs[revokeIdx]
+		revokeControlBlock := revokeMerkleProof.ToControlBlock(
+			&TaprootNUMSKey,
+		)
+
+		ctrlB, err = revokeControlBlock.ToBytes()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// With the control block created, we'll now generate the signature we
 	// need to authorize the spend.
@@ -1982,10 +2005,7 @@ func TaprootCommitSpendRevoke(signer Signer, signDesc *SignDescriptor,
 	witnessStack := make(wire.TxWitness, 3)
 	witnessStack[0] = maybeAppendSighash(revokeSig, signDesc.HashType)
 	witnessStack[1] = signDesc.WitnessScript
-	witnessStack[2], err = revokeControlBlock.ToBytes()
-	if err != nil {
-		return nil, err
-	}
+	witnessStack[2] = ctrlB
 
 	return witnessStack, nil
 }
@@ -2263,17 +2283,30 @@ func TaprootCommitScriptToRemote(remoteKey *btcec.PublicKey,
 // TaprootCommitRemoteSpend allows the remote party to sweep their output into
 // their wallet after an enforced 1 block delay.
 func TaprootCommitRemoteSpend(signer Signer, signDesc *SignDescriptor,
-	sweepTx *wire.MsgTx,
-	scriptTree *txscript.IndexedTapScriptTree) (wire.TxWitness, error) {
+	sweepTx *wire.MsgTx, scriptTree *txscript.IndexedTapScriptTree,
+	ctrl []byte) (wire.TxWitness, error) {
 
 	// First, we'll need to construct a valid control block to execute the
 	// leaf script for sweep settlement.
-	settleTapleafHash := txscript.NewBaseTapLeaf(
-		signDesc.WitnessScript,
-	).TapHash()
-	settleIdx := scriptTree.LeafProofIndex[settleTapleafHash]
-	settleMerkleProof := scriptTree.LeafMerkleProofs[settleIdx]
-	settleControlBlock := settleMerkleProof.ToControlBlock(&TaprootNUMSKey)
+	var (
+		ctrlBytes = ctrl
+		err       error
+	)
+	if len(ctrlBytes) == 0 {
+		settleTapleafHash := txscript.NewBaseTapLeaf(
+			signDesc.WitnessScript,
+		).TapHash()
+		settleIdx := scriptTree.LeafProofIndex[settleTapleafHash]
+		settleMerkleProof := scriptTree.LeafMerkleProofs[settleIdx]
+		settleControlBlock := settleMerkleProof.ToControlBlock(
+			&TaprootNUMSKey,
+		)
+
+		ctrlBytes, err = settleControlBlock.ToBytes()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// With the control block created, we'll now generate the signature we
 	// need to authorize the spend.
@@ -2288,10 +2321,7 @@ func TaprootCommitRemoteSpend(signer Signer, signDesc *SignDescriptor,
 	witnessStack := make(wire.TxWitness, 3)
 	witnessStack[0] = maybeAppendSighash(sweepSig, signDesc.HashType)
 	witnessStack[1] = signDesc.WitnessScript
-	witnessStack[2], err = settleControlBlock.ToBytes()
-	if err != nil {
-		return nil, err
-	}
+	witnessStack[2] = ctrlBytes
 
 	return witnessStack, nil
 }

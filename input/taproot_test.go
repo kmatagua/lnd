@@ -1011,7 +1011,7 @@ func localCommitRevokeWitGen(sigHash txscript.SigHashType,
 
 		return TaprootCommitSpendRevoke(
 			signer, signDesc, spendTx,
-			commitScriptTree.TapscriptTree,
+			commitScriptTree.TapscriptTree, nil,
 		)
 	}
 }
@@ -1211,7 +1211,7 @@ func remoteCommitSweepWitGen(sigHash txscript.SigHashType,
 
 		return TaprootCommitRemoteSpend(
 			signer, signDesc, spendTx,
-			commitScriptTree.TapscriptTree,
+			commitScriptTree.TapscriptTree, nil,
 		)
 	}
 }
